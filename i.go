@@ -20,7 +20,7 @@ var (
 	// the public URL used when returning uploaded file links
 	publicBaseURL = "https://i.mrcheeezz.com"
 	// the directory to save the images in
-	root = "/mnt/storage/uploads/"
+	root = "/mnt/storage/uploads/i/"
 
 	// maximum age for the files
 	// the program will delete the files older than maxAge every 2 hours
