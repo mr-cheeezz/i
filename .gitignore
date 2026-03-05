@@ -8,6 +8,7 @@ i.exe
 # Folders
 _obj
 _test
+.ssh
 
 # Architecture specific extensions/prefixes
 *.[568vq]

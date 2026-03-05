@@ -1,14 +1,14 @@
 package main
 
 import (
-	"bufio"
+	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -18,66 +18,51 @@ var (
 	// the address to listen on
 	address = "127.0.0.1:9005"
 	// the directory to save the images in
-	root = "/var/www/i.fourtf.com/"
+	root = "/mnt/storage/uploads/"
 
 	// maximum age for the files
 	// the program will delete the files older than maxAge every 2 hours
-	maxAge = time.Hour * 24 * 365
+	// default: everything else = 7 days
+	maxAge = time.Hour * 24 * 7
+	// per-category retention sourced from filetypes.json category names
+	categoryMaxAge = map[string]time.Duration{
+		"image":    time.Hour * 24,
+		"icon":     time.Hour * 24,
+		"code":     time.Hour * 24 * 30,
+		"script":   time.Hour * 24 * 30,
+		"document": time.Hour * 24 * 30,
+	}
+	// extension -> category loaded from filetypes.json
+	filetypes = make(map[string]string)
 	// files to be ignored when deleting old files
-	deleteIgnoreRegexp = regexp.MustCompile("index\\.html|favicon\\.ico")
+	deleteIgnoreRegexp = regexp.MustCompile(`index\\.html|favicon\\.ico`)
 
 	// length of the random filename
-	randomAdjectivesCount = 2
-	adjectives            = make([]string, 0)
-	filetypes             = make(map[string]string)
+	randomFilenameLength = 6
+
+	// permanent uploads are stored in this directory under root
+	// set form/query field `permanent=1` to use it for an upload
+	// set defaultPermanentUploads to true to make permanent storage the default behavior
+	permanentSubdir         = "saved"
+	permanentFormFlag       = "permanent"
+	defaultPermanentUploads = false
 )
 
 func main() {
-	rand.Seed(time.Now().UnixNano())
-
-	b, err := ioutil.ReadFile("./filetypes.json")
-
-	if err == nil {
-		data := make(map[string][]string)
-
-		if err = json.Unmarshal(b, &data); err != nil {
-			fmt.Println(err)
-		} else {
-			for val, keys := range data {
-				for _, key := range keys {
-					filetypes["."+strings.TrimLeft(key, ".")] = val
-				}
-			}
-		}
+	if err := loadFiletypes("./filetypes.json"); err != nil {
+		fmt.Printf("warning: failed to load filetypes.json: %v\n", err)
 	}
 
-	fmt.Println(filetypes)
-
-	file, err := os.Open("./adjectives1.txt")
-
-	if err != nil {
+	if err := os.MkdirAll(filepath.Join(root, permanentSubdir), 0755); err != nil {
 		panic(err)
 	}
 
-	r := bufio.NewReader(file)
-
-	for {
-		line, _, err := r.ReadLine()
-
-		if err != nil {
-			break
+	go func() {
+		for {
+			<-time.After(time.Hour * 2)
+			collectGarbage()
 		}
-
-		adjectives = append(adjectives, string(line))
-	}
-
-	// uncomment to collect old files
-	// go func() {
-	// 	for {
-	// 		<-time.After(time.Hour * 2)
-	// 		collectGarbage()
-	// 	}
-	// }()
+	}()
 
 	// create server with read and write timeouts and the desired address
 	server := &http.Server{
@@ -115,31 +100,34 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		filename = filename[:index]
 	}
 
-	lastWord := "File"
-
-	fmt.Println(ext)
-
-	if val, ok := filetypes[ext]; ok {
-		lastWord = strings.Title(val)
-	}
-
 	var savePath string
 	var random string
+	isPermanent := shouldStorePermanently(r)
+	targetDir := root
+
+	if isPermanent {
+		targetDir = filepath.Join(root, permanentSubdir)
+	}
 
 	// find a random filename that doesn't exist already
+	available := false
 	for i := 0; i < 100; i++ {
-		for j := 0; j < randomAdjectivesCount; j++ {
-			random += strings.TrimSpace(strings.Title(adjectives[rand.Intn(len(adjectives))]))
+		random, err = generateRandomName(randomFilenameLength)
+		if err != nil {
+			http.Error(w, "error while generating file name: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
 
-		random += lastWord
+		savePath = filepath.Join(targetDir, random+ext)
 
-		// fuck with link
-		savePath = root + random + ext
-
-		if _, err := os.Stat(savePath); os.IsNotExist(err) {
+		if isFilenameAvailableAcrossPublicPaths(random, ext) {
+			available = true
 			break
 		}
+	}
+	if !available {
+		http.Error(w, "could not generate a unique filename", http.StatusInternalServerError)
+		return
 	}
 
 	link := "https://" + r.Host + "/" + random + ext
@@ -179,8 +167,9 @@ func collectGarbage() {
 			continue
 		}
 
-		if time.Since(file.ModTime()) > maxAge {
-			err := os.Remove(root + fname)
+		fileMaxAge := maxAgeForFile(fname)
+		if time.Since(file.ModTime()) > fileMaxAge {
+			err := os.Remove(filepath.Join(root, fname))
 
 			if err != nil {
 				fmt.Println(err)
@@ -190,4 +179,76 @@ func collectGarbage() {
 			fmt.Printf("Removed %s \n", fname)
 		}
 	}
+}
+
+func generateRandomName(length int) (string, error) {
+	const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	bytes := make([]byte, length)
+
+	if _, err := cryptorand.Read(bytes); err != nil {
+		return "", err
+	}
+
+	for i := range bytes {
+		bytes[i] = alphabet[int(bytes[i])%len(alphabet)]
+	}
+
+	return string(bytes), nil
+}
+
+func shouldStorePermanently(r *http.Request) bool {
+	v := strings.ToLower(strings.TrimSpace(r.FormValue(permanentFormFlag)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultPermanentUploads
+	}
+}
+
+func isFilenameAvailableAcrossPublicPaths(name, ext string) bool {
+	normalPath := filepath.Join(root, name+ext)
+	permanentPath := filepath.Join(root, permanentSubdir, name+ext)
+	return !pathExists(normalPath) && !pathExists(permanentPath)
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func maxAgeForFile(name string) time.Duration {
+	ext := strings.ToLower(filepath.Ext(name))
+	if category, ok := filetypes[ext]; ok {
+		if retention, ok := categoryMaxAge[category]; ok {
+			return retention
+		}
+	}
+	return maxAge
+}
+
+func loadFiletypes(path string) error {
+	b, err := ioutil.ReadFile(path)
+	if err != nil {
+		return err
+	}
+
+	data := make(map[string][]string)
+	if err := json.Unmarshal(b, &data); err != nil {
+		return err
+	}
+
+	for category, extensions := range data {
+		c := strings.ToLower(strings.TrimSpace(category))
+		for _, ext := range extensions {
+			e := "." + strings.ToLower(strings.TrimLeft(strings.TrimSpace(ext), "."))
+			if e != "." {
+				filetypes[e] = c
+			}
+		}
+	}
+
+	return nil
 }
