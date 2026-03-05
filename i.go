@@ -132,7 +132,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link := "https://" + publicBaseURL + "/" + random + ext
+	link := publicFileURL(random + ext)
 
 	// save the file
 	outfile, err := os.Create(savePath)
@@ -219,6 +219,10 @@ func isFilenameAvailableAcrossPublicPaths(name, ext string) bool {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func publicFileURL(name string) string {
+	return strings.TrimRight(publicBaseURL, "/") + "/" + name
 }
 
 func maxAgeForFile(name string) time.Duration {
