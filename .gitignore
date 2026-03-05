@@ -9,6 +9,7 @@ i.exe
 _obj
 _test
 .ssh
+.goenv
 
 # Architecture specific extensions/prefixes
 *.[568vq]

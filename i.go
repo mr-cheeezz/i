@@ -17,6 +17,8 @@ import (
 var (
 	// the address to listen on
 	address = "127.0.0.1:9005"
+	// the public URL used when returning uploaded file links
+	publicBaseURL = "https://i.mrcheeezz.com"
 	// the directory to save the images in
 	root = "/mnt/storage/uploads/"
 
@@ -130,7 +132,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	link := "https://" + r.Host + "/" + random + ext
+	link := publicFileURL(random + ext)
 
 	// save the file
 	outfile, err := os.Create(savePath)
@@ -227,6 +229,10 @@ func maxAgeForFile(name string) time.Duration {
 		}
 	}
 	return maxAge
+}
+
+func publicFileURL(name string) string {
+	return strings.TrimRight(publicBaseURL, "/") + "/" + name
 }
 
 func loadFiletypes(path string) error {
