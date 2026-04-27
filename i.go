@@ -37,7 +37,9 @@ var (
 	// extension -> category loaded from filetypes.json
 	filetypes = make(map[string]string)
 	// files to be ignored when deleting old files
-	deleteIgnoreRegexp = regexp.MustCompile(`index\\.html|favicon\\.ico`)
+	deleteIgnoreRegexp = regexp.MustCompile(`^(index\.html|favicon\.ico)$`)
+	// files eligible for garbage collection must look like generated upload names
+	garbageCollectRegexp = regexp.MustCompile(`^[A-Za-z0-9]{6}(\.[^./\\]+)?$`)
 
 	// length of the random filename
 	randomFilenameLength = 6
@@ -53,6 +55,10 @@ var (
 func main() {
 	if err := loadFiletypes("./filetypes.json"); err != nil {
 		fmt.Printf("warning: failed to load filetypes.json: %v\n", err)
+	}
+
+	if err := validateUploadRoot(root); err != nil {
+		panic(err)
 	}
 
 	if err := os.MkdirAll(filepath.Join(root, permanentSubdir), 0755); err != nil {
@@ -89,7 +95,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	defer infile.Close()
 
-	filename := header.Filename
+	filename := filepath.Base(header.Filename)
 	var ext string
 
 	// get extension from file name
@@ -156,6 +162,11 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func collectGarbage() {
+	if err := validateUploadRoot(root); err != nil {
+		fmt.Printf("refusing to collect garbage: %v\n", err)
+		return
+	}
+
 	files, err := ioutil.ReadDir(root)
 
 	if err != nil {
@@ -165,7 +176,7 @@ func collectGarbage() {
 	for _, file := range files {
 		fname := file.Name()
 
-		if file.IsDir() || deleteIgnoreRegexp.MatchString(fname) {
+		if file.IsDir() || deleteIgnoreRegexp.MatchString(fname) || !garbageCollectRegexp.MatchString(fname) {
 			continue
 		}
 
@@ -178,7 +189,7 @@ func collectGarbage() {
 				continue
 			}
 
-			fmt.Printf("Removed %s \n", fname)
+			fmt.Printf("Removed %s \n", filepath.Join(root, fname))
 		}
 	}
 }
@@ -233,6 +244,37 @@ func maxAgeForFile(name string) time.Duration {
 		}
 	}
 	return maxAge
+}
+
+func validateUploadRoot(path string) error {
+	cleanPath, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return err
+	}
+
+	if cleanPath == string(os.PathSeparator) {
+		return fmt.Errorf("upload root cannot be filesystem root")
+	}
+
+	wd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	cleanWD, err := filepath.Abs(filepath.Clean(wd))
+	if err != nil {
+		return err
+	}
+
+	if cleanPath == cleanWD {
+		return fmt.Errorf("upload root cannot be the project directory: %s", cleanPath)
+	}
+
+	if pathExists(filepath.Join(cleanPath, "go.mod")) || pathExists(filepath.Join(cleanPath, ".git")) {
+		return fmt.Errorf("upload root looks like a source directory: %s", cleanPath)
+	}
+
+	return nil
 }
 
 func loadFiletypes(path string) error {
